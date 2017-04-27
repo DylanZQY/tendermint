@@ -252,33 +252,45 @@ func (h *Handshaker) Handshake(proxyApp proxy.AppConns) error {
 // Returns the final AppHash or an error
 func (h *Handshaker) ReplayBlocks(appHash []byte, appBlockHeight int, proxyApp proxy.AppConns) ([]byte, error) {
 
+	// Internal state of tendermint - read from disk or in the case of a new app it is empty
 	storeBlockHeight := h.store.Height()
 	stateBlockHeight := h.state.LastBlockHeight
+
 	log.Notice("ABCI Replay Blocks", "appHeight", appBlockHeight, "storeHeight", storeBlockHeight, "stateHeight", stateBlockHeight)
 
 	// First handle edge cases and constraints on the storeBlockHeight
+	// No local state stored on disk
 	if storeBlockHeight == 0 {
+		// No local state stored on disk, hence it's genesis time
+		proxyApp.Consensus().InitChainSync()
 		return appHash, h.checkAppHash(appHash)
 
 	} else if storeBlockHeight < appBlockHeight {
+		// the ABCI app is inconsistent
 		// the app should never be ahead of the store (but this is under app's control)
 		return appHash, sm.ErrAppBlockHeightTooHigh{storeBlockHeight, appBlockHeight}
 
 	} else if storeBlockHeight < stateBlockHeight {
+		// the tendermint node is inconsistent
 		// the state should never be ahead of the store (this is under tendermint's control)
 		PanicSanity(Fmt("StateBlockHeight (%d) > StoreBlockHeight (%d)", stateBlockHeight, storeBlockHeight))
 
 	} else if storeBlockHeight > stateBlockHeight+1 {
+		// the tendermint node is inconsistent
 		// store should be at most one ahead of the state (this is under tendermint's control)
 		PanicSanity(Fmt("StoreBlockHeight (%d) > StateBlockHeight + 1 (%d)", storeBlockHeight, stateBlockHeight+1))
 	}
 
-	// Now either store is equal to state, or one ahead.
+	// Now either tendermint store is equal to tendermint state, or one ahead.
 	// For each, consider all cases of where the app could be, given app <= store
 	if storeBlockHeight == stateBlockHeight {
 		// Tendermint ran Commit and saved the state.
 		// Either the app is asking for replay, or we're all synced up.
-		if appBlockHeight < storeBlockHeight {
+		if appBlockHeight == 0 {
+			// the app has no blocks yet and hence we play InitChain
+			// magic to play InitChain
+			return h.replayBlocks(proxyApp, appBlockHeight, storeBlockHeight, false)
+		} else if appBlockHeight < storeBlockHeight {
 			// the app is behind, so replay blocks, but no need to go through WAL (state is already synced to store)
 			return h.replayBlocks(proxyApp, appBlockHeight, storeBlockHeight, false)
 
@@ -290,7 +302,10 @@ func (h *Handshaker) ReplayBlocks(appHash []byte, appBlockHeight int, proxyApp p
 	} else if storeBlockHeight == stateBlockHeight+1 {
 		// We saved the block in the store but haven't updated the state,
 		// so we'll need to replay a block using the WAL.
-		if appBlockHeight < stateBlockHeight {
+		if appBlockHeight == 0 {
+			// the app has no blocks yet and hence we play InitChain
+			// magic to play InitChain
+		} else if appBlockHeight < stateBlockHeight {
 			// the app is further behind than it should be, so replay blocks
 			// but leave the last block to go through the WAL
 			return h.replayBlocks(proxyApp, appBlockHeight, storeBlockHeight, true)
